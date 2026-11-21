@@ -457,6 +457,21 @@ function openStrataSheet(opts) {
         if (!loc.verified && !m.running) acts.push(h("button", { class: "btn slim ghost", type: "button", disabled: busyOther, onclick: act(() => modelsPost("verify", m.id)) }, tr("Check the files")));
       }
     }
+    if (loc.complete || loc.have_bytes > 0) {
+      const st = Store.S.strata;
+      const blocked = L.delete_blocked || (st && (st.online || (st.job && !st.job.endedAt)));
+      acts.push(h("button", {
+        class: "btn slim ghost", type: "button", disabled: !!blocked,
+        title: blocked ? tr("Stop Strata and wait for model operations to finish before deleting.") : null,
+        onclick: act(async () => {
+          if (await confirmSheet({
+            title: tr("Delete {0} from this PC?", [m.name]),
+            message: tr("This removes the model files. Shared files stay on this PC. To use this model again, download it again."),
+            okLabel: tr("Delete model"), danger: true,
+          })) await modelsPost("delete", m.id);
+        }),
+      }, tr("Delete model")));
+    }
     const item = h("div", {
       class: `msel-item strata-model${on ? " current" : ""}`, role: "radio", tabindex: "0", "aria-checked": on ? "true" : "false",
       onclick: (e) => { if (e.target.closest("button")) return; sel = { model: m.id, r: sel ? sel.r : m.default_r || 7 }; picked = true; render(); },
@@ -477,7 +492,9 @@ function openStrataSheet(opts) {
     why.classList.toggle("hidden", !show);
     if (!show) return;
     if (!sel || !picked) sel = defaultSel();
-    const key = JSON.stringify([sel, Spec.v && Spec.v.recommended_r, L.active, L.ram_gib, L.running, L.models.map((m) => [m.id, m.local.complete, m.local.verified, m.local.have_bytes + m.local.partial_bytes > 0,
+    const st = Store.S.strata;
+    const key = JSON.stringify([sel, Spec.v && Spec.v.recommended_r, L.active, L.ram_gib, L.running, L.delete_blocked,
+      st && st.online, !!(st && st.job && !st.job.endedAt), L.models.map((m) => [m.id, m.local.complete, m.local.verified, m.local.have_bytes > 0, m.local.have_bytes + m.local.partial_bytes > 0,
       m.download && m.download.state, m.download && m.download.mode, m.download && m.download.error, m.running, m.recommended, m.fits, m.short, m.shared_missing,
       m.shared_pending, m.shared_bytes]), (L.queue || []).map((q) => [q.id, q.active]),
     (L.shared || []).map((x) => [x.id, x.local.complete, x.download && x.download.state, x.download && x.download.error])]);

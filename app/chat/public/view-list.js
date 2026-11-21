@@ -235,7 +235,10 @@ function ListView(go) {
   searchInput.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSearch(); });
 
   function renderFilter() {
-    if (filter !== "all" && !Store.S.workspaces.some((x) => x.workspaceId === filter)) filter = "all";
+    if (Store.S.workspacesReady && filter !== "all" && !Store.S.workspaces.some((x) => x.workspaceId === filter)) {
+      filter = "all";
+      localStorageSet("dsh-mobile-filter", filter);
+    }
     const w = Store.S.workspaces.find((x) => x.workspaceId === filter);
     wsChip.replaceChildren(icon("folder", "small"), w ? Store.workspaceName(w) : tr("All"), icon("chevron", "small"));
   }
@@ -410,6 +413,11 @@ function NewView(go) {
 
   function renderWs() {
     const w = currentWs();
+    const next = w?.workspaceId || "";
+    if (Store.S.workspacesReady && wsId !== next) {
+      wsId = next;
+      localStorageSet("dsh-mobile-workspace", wsId);
+    }
     wsChip.replaceChildren(icon("folder", "small"), w ? Store.workspaceName(w) : tr("No workspace"), icon("chevron", "small"));
   }
 

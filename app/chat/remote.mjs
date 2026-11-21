@@ -61,7 +61,7 @@ const LOOP = /^(127\.\d+\.\d+\.\d+|::1|::ffff:127\.\d+\.\d+\.\d+)$/;
 const hostOf = (req) => String(req.headers.host || "").toLowerCase();
 const loopHost = (h) => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(h);
 // a request from the PC itself: on the 127.0.0.1 listener, from a loopback address, with a loopback Host
-const isLocal = (req) => !req[REMOTE] && LOOP.test(String(req.socket.remoteAddress || "")) && loopHost(hostOf(req));
+export const isLocal = (req) => !req[REMOTE] && LOOP.test(String(req.socket.remoteAddress || "")) && loopHost(hostOf(req));
 
 // ---- 11/16: the phones logged in (device cookies) ----
 const DEVICES_FILE = RUN ? path.join(RUN, "remote-devices.json") : "";
@@ -248,7 +248,7 @@ export async function settingsGuard(req, res, next) {
     return C.sendJson(res, { ok: false, error: "スマホの接続は PC の画面か sync settings で変えてください" }, 403);
   }
   const again = Readable.from(raw == null ? [Buffer.alloc(16385)] : [Buffer.from(raw, "utf8")]);
-  for (const k of ["method", "url", "headers", "rawHeaders", "httpVersion", "socket"]) again[k] = req[k];
+  for (const k of ["method", "url", "headers", "rawHeaders", "httpVersion", "socket", REMOTE]) again[k] = req[k];
   return next(again, res);
 }
 

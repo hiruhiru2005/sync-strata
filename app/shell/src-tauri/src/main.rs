@@ -569,7 +569,7 @@ fn start_flow(app: &AppHandle) -> Result<tauri::Url, String> {
         progress(app, &tf("prog.already", &[model]));
     } else {
         progress(app, &t("prog.starting"));
-        let mut child = launcher_cmd(&cfg, &["up", "--gui"])
+        let mut child = launcher_cmd(&cfg, &["up", "--desktop-auto"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -600,7 +600,7 @@ fn start_flow(app: &AppHandle) -> Result<tauri::Url, String> {
         let status = child.wait().map_err(|e| tf("err.wait", &[&e.to_string()]))?;
         let stderr = err_reader.join().unwrap_or_default();
         let code = status.code().unwrap_or(-1);
-        cfg.log(&format!("call up --gui → {code}（{} ms）", t0.elapsed().as_millis()));
+        cfg.log(&format!("call up --desktop-auto → {code}（{} ms）", t0.elapsed().as_millis()));
         if code != 0 {
             let why = last_line(&stderr);
             let why = if why.is_empty() { last } else { why };

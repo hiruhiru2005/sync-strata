@@ -148,6 +148,25 @@ function openContextSheet(sessionId) {
   CtxNum.load(true);   // read again each time the sheet opens, so a changed setting shows
 }
 
+function promptBranchTarget(e) {
+  if (e.type !== "user/message" || e.data?.source?.kind !== "user" ||
+      e.surfaceOp !== "append" || !Number.isSafeInteger(e.seq) || e.seq < 0) return null;
+  const parts = e.data.content;
+  const text = Array.isArray(parts) && parts.every((p) => p?.type === "text" && typeof p.text === "string")
+    ? parts.map((p) => p.text).join("") : "";
+  return { atSeq: e.seq - 1, editText: text.trim() ? text : null };
+}
+
+async function createPromptBranch(api, sessionId, target, header, workspace) {
+  // dsh uses an inclusive boundary. Open turns get synthetic closers; never omit atSeq.
+  if (target.atSeq >= 0) return api.forkSession(sessionId, target.atSeq);
+  // There is no event before seq 0. Don't let create silently use a default cwd.
+  if (!workspace?.workspaceId || !header?.cwd || workspace.path !== header.cwd) {
+    throw new Error(tr("Cannot start a branch before the first event: the original workspace could not be verified."));
+  }
+  return api.createSession(workspace.workspaceId, header.agentPreset);
+}
+
 // subInfo: {parentId} when this is a subagent's conversation (10/31): read only, addressed through its parent, back goes to the parent.
 function ChatView(go, sessionId, subInfo) {
   const address = subInfo ? { kind: "subagent", parentSessionId: subInfo.parentId, childSessionId: sessionId, mode: "unknown" } : { kind: "session", sessionId };
@@ -204,6 +223,52 @@ function ChatView(go, sessionId, subInfo) {
       h("button", { class: "icon-btn back-btn", type: "button", "aria-label": tr("Back"), onclick: () => go(subInfo ? Store.routeOf(subInfo.parentId) : "#/", "back"), html: ICONS.back }),
       h("button", { class: "topbar-center", type: "button", "aria-label": tr("Session actions"), onclick: () => openMenu() }, titleEl, subEl), meter, more),
     scroller, jump, h("div", { class: "bottom" }, seatBar, subBar, queue, archivedBar, composer.el));
+
+  let branchHeader = null;
+  let branchSheet = null;
+  let branching = false;
+
+  function openPromptBranch(target) {
+    if (!ready || branchSheet || branching) return;
+    const route = location.hash;
+    const input = target.editText === null ? null : h("textarea", {
+      class: "text-input", rows: 5, "aria-label": tr("Edited prompt"),
+    }, target.editText);
+    if (input) input.value = target.editText;
+    const err = h("div", { class: "form-error bad hidden", role: "alert" });
+    const resend = input && h("button", { class: "btn primary", type: "button", onclick: () => submit(true) }, tr("Edit & resend"));
+    const skip = h("button", { class: "btn ghost", type: "button", onclick: () => submit(false) }, tr("Continue without this prompt"));
+    async function submit(edit) {
+      const text = edit ? input.value : null;
+      if (branching || location.hash !== route || (edit && !text.trim())) return;
+      branching = skip.disabled = true;
+      if (resend) resend.disabled = true;
+      err.classList.add("hidden");
+      try {
+        const child = await createPromptBranch(Api, sessionId, target, branchHeader,
+          Store.S.workspacesReady ? Store.workspaceOf(sessionId) : null);
+        if (edit) Outbox.send(child.sessionId, text, [], () => Api.prompt(child.sessionId, text), { floor: target.atSeq });
+        sheet.close(true);
+        if (el.isConnected && location.hash === route) go(Store.routeOf(child.sessionId));
+        else toast(tr("Branch created: {0}", [child.sessionId]));
+      } catch (e) {
+        err.textContent = tr("Could not create branch: {0}", [errorText(e)]);
+        err.classList.remove("hidden");
+        if (branchSheet !== sheet) toast(err.textContent);
+      } finally {
+        branching = skip.disabled = false;
+        if (resend) resend.disabled = !input.value.trim();
+      }
+    }
+    if (input) input.addEventListener("input", () => { resend.disabled = branching || !input.value.trim(); });
+    const sheet = openSheet([
+      h("div", { class: "sheet-title" }, tr("Branch from this prompt")),
+      h("div", { class: "sheet-note muted" }, tr("The new chat starts before this prompt. The original chat stays unchanged. Workspace files are shared, not rolled back.")),
+      input || h("div", { class: "sheet-note muted" }, tr("Only text-only prompts can be edited and resent.")),
+      err, h("div", { class: "form-actions" }, skip, resend),
+    ], { onClose: () => { if (branchSheet === sheet) branchSheet = null; } });
+    branchSheet = sheet;
+  }
 
   let ready = false; // set once the opening snapshot is drawn: later entries rise in, the history does not
   let stopFollow = null;
@@ -285,6 +350,11 @@ function ChatView(go, sessionId, subInfo) {
           if (subInfo && !subTitle) { subTitle = said.trim().split("\n")[0].slice(0, 40); renderHeader(); }
           const media = Media.strip(sessionId, d.content, "end"); // 10/31: the pictures and files you sent
           const node = h("div", { class: `msg user${media ? " with-media" : ""}` }, said.trim() ? Copy.mark(h("div", { class: "bubble" }, said), said) : null, media);
+          const target = subInfo ? null : promptBranchTarget(e);
+          if (target) {
+            node.classList.add("with-media");
+            node.append(h("button", { class: "mini", type: "button", onclick: () => openPromptBranch(target) }, tr("Branch…")));
+          }
           if (claimPending(e, said)) node.dataset.claimed = "1"; // 11/15: 仮の吹き出しと入れ替え（出し直しの動きは付けない）
           return [node];
         }
@@ -523,6 +593,7 @@ function ChatView(go, sessionId, subInfo) {
       lastSeq = -1;
       evlog = [];
       cursor = f.cursor;
+      branchHeader = f.header;
       const recs = f.records || [];
       oldestSeq = recs.length ? recs[0].event.seq : null;
       for (const r of recs) apply(r.event);
@@ -872,6 +943,7 @@ function ChatView(go, sessionId, subInfo) {
   };
   document.addEventListener("keydown", onKey);
   return { el, destroy() {
+    branchSheet?.close(true);
     off(); offOutbox(); for (const t of sentTimers.values()) clearTimeout(t);
     if (stopFollow) stopFollow(); dropLive(); copier.destroy(); document.removeEventListener("keydown", onKey);
     document.removeEventListener("sync-ctxnum", renderHeader);

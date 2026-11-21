@@ -54,6 +54,16 @@ def main(argv):
         }, ensure_ascii=False))
         return 0
     if cmd == "up":
+        if "--desktop-auto" in argv:
+            try:
+                with open(os.path.join(HOME, "settings.json"), encoding="utf-8-sig") as f:
+                    auto = json.load(f).get("desktop_auto_start")
+            except (OSError, ValueError, AttributeError):
+                auto = None
+            if auto == "off":
+                s["dsh"] = True
+                save(s)
+                return 0
         if os.environ.get("FAKE_SYNC_FAIL_UP") == "1" or os.path.exists(os.path.join(HOME, "fail-up")):
             print("Checking the PC…" if EN else "PC を調べています…", flush=True)
             time.sleep(1)

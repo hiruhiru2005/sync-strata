@@ -11,6 +11,7 @@ const Store = (() => {
     sessions: new Map(), // sessionId -> SessionSummary
     children: new Map(), // 11/2: subagents' sessions (parentSessionId set), kept apart from the list: sessionId -> SessionSummary
     workspaces: [], // WorkspaceView {workspaceId, path, title, sessionIds}
+    workspacesReady: false,
     archived: new Set(),
     pinned: [], // sessionIds, most recently pinned first
     projections: new Map(), // sessionId -> {title, modelSelection, inbox, userQuestions, ...}
@@ -26,7 +27,8 @@ const Store = (() => {
   let generation = 0;
 
   const emit = (topic, id) => { for (const f of listeners) f(topic, id); };
-  const isTop = (s) => !s.parentSessionId && s.origin !== "subagent";
+  // Forks have a parentSessionId for lineage, but only subagents need a parent address.
+  const isTop = (s) => s.origin !== "subagent";
 
   function stopStreams() {
     for (const stop of stops.splice(0)) stop();
@@ -130,6 +132,7 @@ const Store = (() => {
   function onWorkspace(f) {
     if (f.type === "baseline") {
       S.workspaces = [...f.value.items];
+      S.workspacesReady = true;
       S.archived = new Set(f.value.archivedSessionIds || []);
       S.pinned = [...(f.value.pinnedSessionIds || [])];
     } else if (f.type === "upsert") {
@@ -137,7 +140,8 @@ const Store = (() => {
       if (i >= 0) S.workspaces[i] = f.workspace;
       else S.workspaces.push(f.workspace);
     } else if (f.type === "remove") {
-      S.workspaces = S.workspaces.filter((w) => w.workspaceId !== f.workspaceId);
+      removeWorkspace(f.workspaceId);
+      return;
     } else if (f.type === "order") {
       const by = new Map(S.workspaces.map((w) => [w.workspaceId, w]));
       S.workspaces = f.workspaceIds.map((id) => by.get(id)).filter(Boolean);
@@ -285,6 +289,13 @@ const Store = (() => {
     emit("workspaces");
   }
 
+  function removeWorkspace(id) {
+    const remaining = S.workspaces.filter((w) => w.workspaceId !== id);
+    if (remaining.length === S.workspaces.length) return;
+    S.workspaces = remaining;
+    emit("workspaces");
+  }
+
   function setTitle(id, title) {
     const p = S.projections.get(id) || {};
     p.title = title;
@@ -294,7 +305,7 @@ const Store = (() => {
 
   return {
     S, start, pollStrata, title, workspaceOf, workspaceName, pendingFor, selection, modelInfo, sortedSessions,
-    groupedSessions, archivedSessions, isPinned, isArchived, applyRegistry, setTitle,
+    groupedSessions, archivedSessions, isPinned, isArchived, applyRegistry, removeWorkspace, setTitle,
     runningAll, childrenOf, runningUnder, subLabel, isChild, routeOf,
     on(f) { listeners.add(f); return () => listeners.delete(f); },
   };

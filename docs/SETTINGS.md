@@ -20,6 +20,18 @@ All settings live in one file (`settings.json`), and the app (PC and phone) and 
 | `ram_squeeze` | `auto`, `off` | Memory squeeze. At start, and once each time you switch models, it pushes the RAM used by other apps out of memory and gives the freed RAM to the model (no app is closed). `auto` (default) is on; `off` turns it off. The amount is shown in the start reason |
 | `expert_learning` | `on`, `off` | Learns the order of experts from the chats on this PC and saves it. The default is `off`. In a measurement with Sync-S, R4, dsh chats, the learned order was not faster than upstream's order (93.7 vs 96.1 tok/s), so it is not on by default. With `on`, the learned order is saved in `SYNC_HOME\engine-data` |
 
+## Model directory
+
+On the PC, open **Strata settings → Model directory**. Enter an absolute folder path, or choose **Automatic** to use the default (Windows: `SYNC_HOME\models`; Linux: `$XDG_DATA_HOME/SyncStrata/models`, normally `~/.local/share/SyncStrata/models`). This option is unavailable when a fixed catalog overrides the distributed catalog.
+
+Finish or cancel downloads and checks before saving. After saving, choose **Stop everything**, then reopen Sync-Strata; closing the window alone is not enough. Nothing is moved or deleted by the setting change. After restart, models must already be in the new directory in the expected layout or be downloaded there. Chat history is unaffected. If `sessions_dir` is `auto` and would resolve to a different K/V cache location, the previous location is saved explicitly. Set `sessions_dir` back to `auto` separately if you want the cache to follow the new model directory; that does not move existing cache files.
+
+## Desktop startup
+
+In **Strata settings**, uncheck **Start the model automatically when opening the desktop app** to open chat without loading a model. You can also run `sync settings set desktop_auto_start off`. The default is `on` (`auto` resets to that default).
+
+This applies the next time the native desktop app opens its chat window. It does not stop an already-running model or change explicit starts from the model picker or `sync up`.
+
 ## Checking the context settings
 
 With `auto`, they follow your VRAM like this (if only one is `auto`, it matches the one you set):

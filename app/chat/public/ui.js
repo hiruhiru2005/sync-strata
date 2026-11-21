@@ -108,8 +108,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 // A sheet with one text field. onSubmit(value) may throw: the message is shown under the field and the sheet stays.
-function openPrompt({ title, value = "", placeholder = "", okLabel = null, note = "", onSubmit }) {
-  const input = h("input", { class: "text-input", type: "text", value, placeholder, maxlength: 200, enterkeyhint: "done", autocomplete: "off" });
+function openPrompt({ title, value = "", placeholder = "", okLabel = null, note = "", maxLength = 200, onSubmit }) {
+  const input = h("input", { class: "text-input", type: "text", value, placeholder, maxlength: maxLength, enterkeyhint: "done", autocomplete: "off" });
   const err = h("div", { class: "form-error bad hidden" });
   const ok = h("button", { class: "btn primary", type: "button" }, okLabel || tr("Save"));
   async function submit() {

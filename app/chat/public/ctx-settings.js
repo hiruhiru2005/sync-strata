@@ -85,7 +85,34 @@ const CtxSettings = (() => {
   // for the start settings sheet: the button (small, at the end), then the token row
   function extras() {
     const btn = h("button", { class: "btn slim ghost ctx-open", type: "button", onclick: () => open() }, tr("Context settings"));
-    return [h("div", { class: "set-group ctx-open-row" }, btn)];
+    const row = h("div", { class: "set-group" });
+    const name = "desktop_auto_start";
+    // These strings live here to avoid touching the shared locale tables.
+    const text = {
+      ja: "デスクトップアプリを開くときにモデルを自動で起動する",
+      zh: "打开桌面应用时自动启动模型",
+      en: "Start the model automatically when opening the desktop app",
+    };
+    call("/m/settings").then((cur) => {
+      if (!cur.schema?.[name]) return;
+      const toggle = h("input", { type: "checkbox" });
+      toggle.checked = cur.settings[name] !== "off";
+      toggle.addEventListener("change", async () => {
+        const on = toggle.checked;
+        toggle.disabled = true;
+        try {
+          await call("/m/settings", { [name]: on ? "on" : "off" });
+          toast(tr("Saved. It takes effect at the next start"));
+        } catch (e) {
+          toggle.checked = !on;
+          toast(e.message);
+        } finally {
+          toggle.disabled = false;
+        }
+      });
+      row.append(h("label", {}, toggle, " " + (text[I18n.lang] || text.en)));
+    }).catch((e) => { row.textContent = e.message; });
+    return [row, h("div", { class: "set-group ctx-open-row" }, btn)];
   }
 
   return { open, extras };

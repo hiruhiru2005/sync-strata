@@ -130,7 +130,7 @@ LOCAL = A.local_dir or (M or {}).get("local_dir", "")
 VERIFIED_DIR = A.verified_dir or os.path.dirname(os.path.abspath(A.status))
 GIB = 1024 ** 3
 
-S = {"id": A.id, "pid": os.getpid(), "state": "starting", "started_at": time.time(), "file": None, "files_done": 0,
+S = {"id": A.id, "local_dir": os.path.abspath(LOCAL), "pid": os.getpid(), "state": "starting", "started_at": time.time(), "file": None, "files_done": 0,
      "files_total": 0, "done_bytes": 0, "total_bytes": 0, "speed_bps": None, "eta_s": None, "error": None, "message": None,
      "verify": None, "mode": "verify" if A.verify_only else "download"}
 LOCK = threading.Lock()

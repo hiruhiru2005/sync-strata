@@ -137,17 +137,48 @@ function openSessionActions(id, opts = {}) {
 
 // --- workspaces ---
 
+const workspaceRemovals = new Set();
+
+async function confirmWorkspaceRemoval(w) {
+  const id = w.workspaceId;
+  if (workspaceRemovals.has(id)) return;
+  workspaceRemovals.add(id);
+  try {
+    const ok = await confirmSheet({
+      title: tr("Remove workspace {0}?", [Store.workspaceName(w)]),
+      message: tr("This removes {0} from the workspace list. The folder, project files, and session logs are kept. Existing sessions remain available outside this workspace, and running work is not stopped.", [w.path]),
+      okLabel: tr("Remove workspace"), danger: true,
+    });
+    if (!ok) return;
+    await Api.removeWorkspace(id);
+    Store.removeWorkspace(id);
+    toast(tr("Workspace removed"));
+  } catch (e) {
+    toast(errorText(e));
+  } finally {
+    workspaceRemovals.delete(id);
+  }
+}
+
 // onPick(workspace | {workspaceId: "all"}) after a row is tapped. includeAll adds the "すべて" row used as a list filter.
 function openWorkspaceSheet({ currentId, includeAll = false, title = tr("Workspace"), onPick, onAdded }) {
   const list = h("div", { class: "ws-list" });
 
+  function selectedId() {
+    const workspaces = Store.S.workspaces;
+    if (workspaces.some((w) => w.workspaceId === currentId)) return currentId;
+    return includeAll ? "all" : workspaces[0]?.workspaceId;
+  }
+
   function row(id, name, sub, w) {
-    const cur = id === currentId;
+    const cur = id === selectedId();
     return h("div", { class: `ws-row${cur ? " current" : ""}` },
       h("button", { class: "ws-main", type: "button", onclick: () => { s.close(); onPick(w || { workspaceId: id }); } },
         h("div", { class: "ws-name" }, name, cur ? icon("check", "small") : null),
         sub ? h("div", { class: "ws-path muted small" }, sub) : null),
-      w ? h("button", { class: "icon-btn small", type: "button", "aria-label": tr("Rename"), html: ICONS.edit, onclick: () => renameWorkspace(w) }) : null);
+      w ? h("button", { class: "icon-btn small", type: "button", "aria-label": tr("Rename"), html: ICONS.edit, onclick: () => renameWorkspace(w) }) : null,
+      w ? h("button", { class: "icon-btn small", type: "button", title: tr("Remove workspace"),
+        "aria-label": tr("Remove workspace {0}", [name]), html: ICONS.close, onclick: () => confirmWorkspaceRemoval(w) }) : null);
   }
 
   function render() {

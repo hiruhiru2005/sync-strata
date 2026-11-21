@@ -244,7 +244,7 @@ def cmd_settings(argv):
     if not argv or argv[0] == "get":
         raw = H.settings_raw()
         if "--json" in argv:
-            print_json({"settings": raw, "schema": {k: {"help": v[0], "default": v[2]} for k, v in H.SCHEMA.items()},
+            print_json({"settings": raw, "models_directory": {"path": H._models_dir(), "configurable": H.configurable_catalog()}, "schema": {k: {"help": v[0], "default": v[2]} for k, v in H.SCHEMA.items()},
                         "models": [{"id": m["id"], "name": m.get("name", m["id"])} for m in H.catalog().get("models", [])], "file": os.path.join(H.home(), "settings.json")})
         else:
             for k, (help_, _, dflt) in H.SCHEMA.items():
@@ -253,12 +253,16 @@ def cmd_settings(argv):
         return 0
     if argv[0] == "set" and len(argv) >= 3:
         try:
+            old_models_dir = H._models_dir() if argv[1] == "models_dir" else None
             v = H.settings_set(argv[1], argv[2])
-        except (KeyError, ValueError) as e:
+        except (KeyError, ValueError, OSError) as e:
             print(str(e).strip("'\""), file=sys.stderr)
             return 2
         if "--json" in argv:
-            print_json({"ok": True, "name": argv[1], "value": v})
+            out = {"ok": True, "name": argv[1], "value": v}
+            if old_models_dir is not None:
+                out["path_changed"] = os.path.normcase(old_models_dir) != os.path.normcase(H._models_dir())
+            print_json(out)
         else:
             print(f"{argv[1]} = {v}（次の起動から効きます）")
         return 0

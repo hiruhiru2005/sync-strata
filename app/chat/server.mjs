@@ -312,6 +312,9 @@ function strataRequests(res, url) {
 // minimized window, wait until it answers, report whether every expert fits in RAM); its output goes to a log the page
 // shows. Stop runs stop-strata.ps1 (ends the server that listens on 8080, and with it the engine).
 let job = null; // {kind, startedAt, endedAt, code, log}
+let startsPending = 0;
+let shuttingDown = false;
+let updateApplying = false;
 
 function jobView() {
   if (!job) return null;
@@ -457,6 +460,7 @@ async function strataControl(req, res, action) {
   if (action === "guard") return sendJson(res, { ok: true, ...(await unityGuard()) });
   if (busy) return sendJson(res, { ok: false, error: job.kind === "start" ? "起動の途中です" : "終了の途中です" });
   if (action === "start") {
+    if (modelDirectoryBlocked()) return sendJson(res, { ok: false, error: modelDirectoryRestart }, 409);
     // 11/15: ?model=<id in models.json>&r=4..7 (tail skip of this start; none = the model's own setting) and restart=1
     // (when Strata runs: stop it, then start the chosen one, in one job). The 11/9 ?preset=syncm|syncs still works.
     const q = new URL(req.url, "http://x").searchParams;
@@ -476,7 +480,9 @@ async function strataControl(req, res, action) {
       if (![4, 5, 6, 7, 10].includes(r)) return sendJson(res, { ok: false, error: "tail skip は 4・7・10 です" });
     }
     const restart = q.get("restart") === "1";
-    await pollStrata();
+    startsPending++;
+    try { await pollStrata(); } finally { startsPending--; }
+    if (job && !job.endedAt) return sendJson(res, { ok: false, error: "起動か終了の途中です" });
     if (snapshot.online && !restart) return sendJson(res, { ok: false, error: "Strata はもう動いています" });
     if (LAUNCHER) {
       // 11/15 app1115: the launcher decides the rest (settings.json, then this model and quality/speed; auto = it looks at the PC)
@@ -531,6 +537,12 @@ function readBody(req, max = 16384) {
   });
 }
 
+let savingSettings = false;
+let changingModelDirectory = false;
+let modelDirectoryChanged = false;
+const modelDirectoryRestart = "Stop everything and reopen Sync-Strata to use the new model directory.";
+const modelDirectoryBlocked = () => changingModelDirectory || modelDirectoryChanged;
+
 async function settingsRoute(req, res) {
   if (!LAUNCHER) return sendJson(res, { ok: false, error: "この中継は起動の道具から起こされていません（設定は sync settings で）" }, 404);
   if (req.method === "GET") {
@@ -541,14 +553,51 @@ async function settingsRoute(req, res) {
     let body = null;
     try { body = JSON.parse((await readBody(req)) || "null"); } catch { body = null; }
     if (!body || typeof body !== "object" || Array.isArray(body)) return sendJson(res, { ok: false, error: "{名前: 値} の形で送ってください" }, 400);
-    for (const [k, v] of Object.entries(body)) {
+    const entries = Object.entries(body);
+    const changesDirectory = Object.hasOwn(body, "models_dir");
+    const local = localStorageSettings(req);
+    if (!local && entries.some(([k]) => ["models_dir", "sessions_dir", "dsh_home"].includes(k)))
+      return sendJson(res, { ok: false, error: "Storage paths can only be changed on this PC." }, 403);
+    for (const [k, v] of entries) {
       if (!/^[a-z_]{2,32}$/.test(k) || (typeof v !== "string" && typeof v !== "number")) return sendJson(res, { ok: false, error: `${k} の値が読めません` }, 400);
-      const r = await launcher(["settings", "set", k, String(v), "--json"]);
-      if (r.code !== 0) return sendJson(res, { ok: false, error: (r.err || r.out).trim() || `${k} を変えられませんでした` });
+    }
+    if (savingSettings) return sendJson(res, { ok: false, error: "Another setting is being saved. Try again." }, 409);
+    if (changesDirectory && (entries.length !== 1 || typeof body.models_dir !== "string" || !body.models_dir.trim()))
+      return sendJson(res, { ok: false, error: "Send the model directory separately as an absolute path or auto." }, 400);
+    if (changesDirectory && modelDeleteBusy(readCatalog()))
+      return sendJson(res, { ok: false, error: "Finish or cancel all model downloads and checks, and wait for any start or stop to finish before changing the model directory." }, 409);
+    savingSettings = true;
+    changingModelDirectory = changesDirectory;
+    try {
+      if (changesDirectory) {
+        const before = await launcher(["settings", "get", "--json"]);
+        if (!lastJsonLine(before.out)?.models_directory?.configurable)
+          return sendJson(res, { ok: false, error: "This installation uses a fixed model catalog." }, 409);
+      }
+      for (const [k, v] of entries) {
+        const r = await launcher(["settings", "set", k, String(v), "--json"]);
+        if (r.code !== 0) return sendJson(res, { ok: false, error: (r.err || r.out).trim() || `${k} を変えられませんでした` });
+        if (changesDirectory && lastJsonLine(r.out)?.path_changed !== false) modelDirectoryChanged = true;
+      }
+      return await sendSettings(req, res);
+    } finally {
+      savingSettings = changingModelDirectory = false;
     }
   }
+  return sendSettings(req, res);
+}
+
+function localStorageSettings(req) {
+  return Remote?.isLocal(req) && !Object.keys(req.headers).some((k) => k === "forwarded" || k.startsWith("x-forwarded-"));
+}
+
+async function sendSettings(req, res) {
   const r = await launcher(["settings", "get", "--json"]);
-  try { return sendJson(res, { ok: true, ...JSON.parse(r.out) }); } catch { return sendJson(res, { ok: false, error: (r.err || "設定を読めませんでした").trim() }); }
+  try {
+    const data = JSON.parse(r.out);
+    if (!localStorageSettings(req)) delete data.models_directory;
+    return sendJson(res, { ok: true, ...data });
+  } catch { return sendJson(res, { ok: false, error: (r.err || "設定を読めませんでした").trim() }); }
 }
 
 async function shutdownRoute(req, res, url) {
@@ -556,12 +605,14 @@ async function shutdownRoute(req, res, url) {
   if (!(await dshLoggedIn(req))) return sendJson(res, { ok: false, error: "dsh にログインしていません" }, 403);
   logAccess(req, res);
   const what = url.searchParams.get("what") === "all" ? "all" : "engine";
+  if (changingModelDirectory) return sendJson(res, { ok: false, error: "Wait for the model directory to finish saving." }, 409);
   if (what === "engine") {
     if (job && !job.endedAt) return sendJson(res, { ok: false, error: "起動か終了の途中です" });
     runJob("stop", stopSteps());
     return sendJson(res, { ok: true, what });
   }
   // everything, this relay included: answer first, then start the launcher on its own (it outlives this process)
+  shuttingDown = true;
   sendJson(res, { ok: true, what });
   setTimeout(() => {
     const c = spawn(SYNC_PY, ["-X", "utf8", LAUNCHER, "down", "--all"], { stdio: "ignore", windowsHide: true, detached: true });
@@ -607,12 +658,15 @@ function freeBytes(dir) {
 }
 function sharedState(cat) {
   return (cat.shared || []).map((x) => ({
-    id: x.id, name: x.name, optional: !!x.optional, local: localState(x), download: dlView(x.id),
+    id: x.id, name: x.name, optional: !!x.optional, local: localState(x), download: dlView(x),
     downloadable: !!(x.hf && x.hf.repo), free_bytes: freeBytes(x.local_dir),
   }));
 }
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8").replace(/^﻿/, "")); } catch { return null; } };
-const sameDir = (a, b) => path.resolve(String(a || "")).toLowerCase() === path.resolve(String(b || "")).toLowerCase();
+const sameDir = (a, b) => {
+  const key = (v) => process.platform === "win32" ? path.resolve(v).toLowerCase() : path.resolve(v);
+  return !!a && !!b && key(a) === key(b);
+};
 
 // What is on disk: the files whose size is as listed, and the bytes of a download that was cut off (huggingface_hub's
 // .incomplete files, from which a resumed download goes on). "verified": the last check (model_dl.py) passed and no
@@ -725,6 +779,7 @@ function dlStatus(id) {
 }
 const activeDownload = (cat) => [...(cat.models || []), ...(cat.shared || [])].map((m) => m.id).find((id) => { const s = dlStatus(id); return s && DL_ACTIVE.has(s.state); }) || null;
 
+let downloadsStarting = 0;
 let pythonExe = process.env.DSH_MODELS_PYTHON || null;
 function findPython(cat) {
   if (cat.python) return Promise.resolve(cat.python);
@@ -744,11 +799,12 @@ async function startDownload(id, verifyOnly) {
   if (job && !job.endedAt && job.model === id) return { ok: false, error: `${m.name} の起動の途中です` };
   if (verifyOnly && !localState(m).complete) return { ok: false, error: `${m.name} は手元にそろっていません` };
   let py;
-  try { py = await findPython(cat); } catch (e) { return { ok: false, error: e.message }; }
+  downloadsStarting++;
+  try { py = await findPython(cat); } catch (e) { return { ok: false, error: e.message }; } finally { downloadsStarting--; }
   const status = path.join(MODELS_STATE, `dl-${id}.json`);
   const stopFile = path.join(MODELS_STATE, `dl-${id}.stop`);
   fs.rmSync(stopFile, { force: true });
-  fs.writeFileSync(status, JSON.stringify({ id, state: "starting", mode: verifyOnly ? "verify" : "download", updated_at: Date.now() / 1000, started_at: Date.now() / 1000 }));
+  fs.writeFileSync(status, JSON.stringify({ id, local_dir: m.local_dir, state: "starting", mode: verifyOnly ? "verify" : "download", updated_at: Date.now() / 1000, started_at: Date.now() / 1000 }));
   const args = ["-X", "utf8", MODELS_DL, "--catalog", MODELS_CATALOG, "--id", id, "--status", status, "--stop-file", stopFile, "--verified-dir", MODELS_STATE];
   if (verifyOnly) args.push("--verify-only");
   if (MODELS_HF_ENDPOINT) args.push("--endpoint", MODELS_HF_ENDPOINT);
@@ -759,7 +815,10 @@ async function startDownload(id, verifyOnly) {
   fs.closeSync(out);
   const d = { child, stopFile, stopAsked: false, verifyOnly: !!verifyOnly };
   downloads.set(id, d);
-  child.on("error", (e) => { fs.writeFileSync(status, JSON.stringify({ id, state: "failed", error: e.message, updated_at: Date.now() / 1000 })); });
+  child.on("error", (e) => {
+    if (downloads.get(id) === d) downloads.delete(id);
+    fs.writeFileSync(status, JSON.stringify({ id, local_dir: m.local_dir, state: "failed", error: e.message, updated_at: Date.now() / 1000 }));
+  });
   child.on("exit", (code) => {
     const s = readJson(status) || { id };
     if (DL_ACTIVE.has(s.state)) {  // ended without saying so (stopped by force, or it broke)
@@ -832,7 +891,7 @@ function enqueueDownload(id) {
 // Starts the head of the list when nothing is running. One that cannot start is dropped and the next one is tried.
 let ticking = false;
 async function queueTick() {
-  if (ticking) return;
+  if (ticking || modelDirectoryBlocked()) return;
   ticking = true;
   try {
     for (let guard = 0; guard < 50; guard++) {
@@ -866,9 +925,9 @@ function cancelDownload(id) {
 
 const DL_FIELDS = ["state", "mode", "file", "files_done", "files_total", "done_bytes", "total_bytes", "speed_bps", "eta_s", "error", "message", "verify", "updated_at"];
 DL_FIELDS.push("error_kind");   // 11/15 係 C: "auth" = a private model and no (or a wrong) token
-function dlView(id) {
-  const s = dlStatus(id);
-  if (!s) return null;
+function dlView(m) {
+  const s = dlStatus(m.id);
+  if (!s || !sameDir(s.local_dir, m.local_dir)) return null;
   const v = {};
   for (const k of DL_FIELDS) if (s[k] !== undefined) v[k] = k === "verify" && s.verify ? { done_bytes: s.verify.done_bytes, total_bytes: s.verify.total_bytes, bad: s.verify.bad } : s[k];
   return v;
@@ -883,6 +942,98 @@ function queueView(cat) {
 
 // Which one suits this PC: the largest whose experts all fit in this RAM (fits_ram_gib, in the GB a PC is sold with:
 // a "32 GB" PC reports about 31.6 GiB, hence the 1 GiB of slack), otherwise the smallest.
+function modelDeleteBusy(cat) {
+  if (startsPending || (job && !job.endedAt) || shuttingDown || updateApplying) return true;
+  if (downloadsStarting || downloads.size || queueRead().length || activeDownload(cat)) return true;
+  // A worker from a previous relay can still be alive even if its progress file has gone stale.
+  return [...(cat.models || []), ...(cat.shared || [])].some(({ id }) => {
+    const s = dlStatus(id);
+    if (s?.state !== "interrupted" || !Number.isSafeInteger(s.pid) || s.pid <= 0) return false;
+    try { process.kill(s.pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; }
+  });
+}
+
+async function engineStoppedForDelete() {
+  if (LAUNCHER) {
+    const r = await launcher(["status", "--json"]);
+    const engine = lastJsonLine(r.out)?.engine;
+    // The launcher can own an engine that is not yet healthy (starting or restarting).
+    if (r.code !== 0 || engine?.up !== false || engine?.own !== false) return false;
+  }
+  try {
+    // A responding but unhealthy engine (or a timeout) is not evidence of a stop.
+    await fetch(`${STRATA}/metrics`, { signal: AbortSignal.timeout(2500), redirect: "error" });
+    return false;
+  } catch (e) { return e.cause?.code === "ECONNREFUSED"; }
+}
+
+function catalogFile(item, file) {
+  const parts = typeof file.path === "string" ? file.path.split(/[\\/]/) : [];
+  if (typeof item.local_dir !== "string" || !item.local_dir || !parts.length ||
+      parts.some((p) => !p || p === "." || p === ".." || /[:\x00]/.test(p) || /[. ]$/.test(p))) {
+    throw new Error("Unsafe catalog path");
+  }
+  return path.resolve(item.local_dir, ...parts);
+}
+
+function existingFile(file, stat) {
+  try { return stat(file); } catch (e) { if (e.code === "ENOENT") return null; throw e; }
+}
+
+function modelDeleteFiles(cat, m) {
+  const key = (p) => process.platform === "win32" ? p.toLowerCase() : p;
+  const protectedFiles = new Set();
+  for (const other of [...(cat.models || []), ...(cat.shared || [])]) {
+    if (other === m) continue;
+    for (const f of other.files || []) {
+      const file = catalogFile(other, f);
+      protectedFiles.add(key(file));
+      const real = existingFile(file, fs.realpathSync.native);
+      if (real) protectedFiles.add(key(real));
+    }
+  }
+  const files = new Map();
+  for (const f of m.files || []) {
+    const file = catalogFile(m, f);
+    const st = existingFile(file, fs.lstatSync);
+    if (!st) continue;
+    // Refuse links/junctions in the target path and never remove a directory or a shared entry.
+    const real = key(fs.realpathSync.native(file));
+    if (!st.isFile() || real !== key(file) || protectedFiles.has(real)) throw new Error("Unsafe model file");
+    files.set(real, file);
+  }
+  return [...files.values()];
+}
+
+async function deleteModel(id) {
+  const fail = (error) => ({ ok: false, error });
+  const busy = () => fail("起動・終了・更新・ダウンロード・検査が終わってから削除してください");
+  const jobBefore = job;
+  try {
+    let cat = readCatalog();
+    if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id) || !modelById(cat, id)) return fail("一覧にないモデルです");
+    if (modelDeleteBusy(cat)) return busy();
+    if (!(await engineStoppedForDelete())) return fail("Strata を停止してから削除してください");
+    // Re-read after the probe. Keep the checks and unlinks synchronous so relay jobs cannot interleave.
+    cat = readCatalog();
+    if (modelDirectoryBlocked() || job !== jobBefore || modelDeleteBusy(cat)) return busy();
+    const m = modelById(cat, id);
+    if (!m || m.pending || [...(cat.models || []), ...(cat.shared || [])].filter((x) => x.id.toLowerCase() === id.toLowerCase()).length !== 1) {
+      return fail("削除できるモデルではありません");
+    }
+    const files = modelDeleteFiles(cat, m);
+    if (!files.length) return fail("削除するモデルファイルがありません");
+    for (const name of [`verified-${id}.json`, `dl-${id}.json`, `dl-${id}.json.tmp`, `dl-${id}.stop`, `dl-${id}.out`]) {
+      fs.rmSync(path.join(MODELS_STATE, name), { force: true });
+    }
+    for (const file of files) fs.unlinkSync(file);
+    return { ok: true };
+  } catch (e) {
+    console.error("Model deletion failed:", e.message);
+    return fail("モデルファイルを削除できませんでした。一覧を確認してください");
+  }
+}
+
 function modelsView() {
   const cat = readCatalog();
   // 11/15 本人: RAM 32 GB でも VRAM が 12 GB 未満なら Sync-XS を勧める．fits_vram_gib＝これだけの VRAM が要る
@@ -910,13 +1061,14 @@ function modelsView() {
       id: m.id, name: m.name, preset: m.preset || null, match: m.match || m.id, description: m.description || {}, experts_gib: m.experts_gib || null,
       fits_ram_gib: m.fits_ram_gib || null, fits: fitsOf(m), short: ramShort(m) ? "ram" : vramShort(m) ? "vram" : null, recommended: !!rec && rec.id === m.id, default_r: m.default_r ?? null, pending: !!m.pending,
       local: loc, shared_missing: loc.complete ? (LAUNCHER ? shared.filter((x) => !x.optional && !x.local.complete).map((x) => x.name) : sharedMissing(m)) : [],
-      free_bytes: freeBytes(m.local_dir), download: dlView(m.id), running: !!runningModel && runningModel.id === m.id,
+      free_bytes: freeBytes(m.local_dir), download: dlView(m), running: !!runningModel && runningModel.id === m.id,
       // 11/17 W1: the shared parts its download would bring (not here, not already on the list), and how much they are
       shared_pending: wanted.filter((s) => !inQueue.has(s.id)).map((s) => s.name), shared_bytes: wanted.filter((s) => !inQueue.has(s.id)).reduce((a, s) => a + itemLeft(s), 0),
     };
   });
   return {
     ok: true, ram_gib: Math.round(ram * 10) / 10, models, active: activeDownload(cat), queue, catalog_error: cat.error || null,
+    delete_blocked: snapshot.online || modelDeleteBusy(cat),
     running: runningModel ? { model: runningModel.id, r: choice && choice.model === runningModel.id ? choice.r ?? null : null } : null,
     choice: choice ? { model: choice.model, r: choice.r ?? null } : null,
     // 11/15 app1115: the shared parts, whether this is a first run (no model, or a shared part missing), and whether the launcher
@@ -932,11 +1084,13 @@ async function modelsRoute(req, res, url, action) {
     lastAsked = Date.now();
     if (!action) return sendJson(res, modelsView());
     const cat = readCatalog();
-    return sendJson(res, { ok: true, active: activeDownload(cat), queue: queueView(cat), downloads: Object.fromEntries([...(cat.models || []), ...(cat.shared || [])].map((m) => [m.id, dlView(m.id)])) });
+    return sendJson(res, { ok: true, active: activeDownload(cat), queue: queueView(cat), downloads: Object.fromEntries([...(cat.models || []), ...(cat.shared || [])].map((m) => [m.id, dlView(m)])) });
   }
   if (!(await dshLoggedIn(req))) return sendJson(res, { ok: false, error: "dsh にログインしていません" }, 403);
   logAccess(req, res);
+  if (modelDirectoryBlocked()) return sendJson(res, { ok: false, error: modelDirectoryRestart }, 409);
   const id = url.searchParams.get("id") || "";
+  if (action === "delete") return sendJson(res, await deleteModel(id));
   if (action === "cancel") return sendJson(res, cancelDownload(id));
   if (action === "verify") return sendJson(res, await startDownload(id, true));
   return sendJson(res, enqueueDownload(id));   // 11/17 W1: a download is put on the list (D: with its shared parts, E: behind the others)
@@ -1142,8 +1296,11 @@ async function updateApplyRoute(req, res, url) {
   if (!isPcRequest(req)) return sendJson(res, { ok: false, kind: "pc_only", error: "更新は PC の画面から行ってください" }, 403);
   if (job && !job.endedAt) return sendJson(res, { ok: false, kind: "busy", error: "起動か終了の途中です" });
   const lang = url.searchParams.get("lang");
+  if (updateApplying) return sendJson(res, { ok: false, kind: "busy", error: "更新の途中です" });
+  updateApplying = true;
   const r = await launcher(["update", "apply", "--json", ...(["ja", "en", "zh"].includes(lang) ? ["--lang", lang] : [])], 20000);
   const d = lastJsonLine(r.out) || { ok: false, kind: "old_tool", error: (r.err || r.out).trim().split("\n").pop() };
+  updateApplying = !!d.started;
   updCache.at = 0;
   return sendJson(res, { ok: !!d.ok, started: !!d.started, window: !!d.window, log: d.log, kind: d.kind, error: d.error || d.detail });
 }
@@ -1161,7 +1318,7 @@ const server = http.createServer((req, res) => {
     const name = url.pathname.slice(3);
     const control = name.match(/^strata\/(guard|start|stop)$/);
     if (control) return strataControl(req, res, control[1]);
-    // 11/15: GET /m/models (the list), GET /m/models/progress, POST /m/models/download|cancel|verify?id=<model>
+    // 11/15: GET /m/models (the list), GET /m/models/progress, POST /m/models/download|cancel|verify|delete?id=<model>
     if (Remote && name.startsWith("remote/")) return Remote.route(req, res, url, name);   // 11/15 係 R: /m/remote/status|pair|claim|apply
     if (Remote && name === "settings" && req.method === "POST") return Remote.settingsGuard(req, res, settingsRoute);   // 11/15 係 R: lan_remote は PC からだけ
     if (name === "settings" && (req.method === "GET" || req.method === "POST")) return settingsRoute(req, res);   // 11/15 app1115
@@ -1172,8 +1329,8 @@ const server = http.createServer((req, res) => {
     if (name === "update" && req.method === "GET") return updateCheckRoute(req, res, url);   // 11/18 係 W9
     if (name === "update/apply" && req.method === "POST") return updateApplyRoute(req, res, url);
     if (name === "hf-token" && req.method === "GET") return hfTokenRoute(req, res);
-    const models = name.match(/^models(?:\/(progress|download|cancel|verify))?$/);
-    if (models && (models[1] === "download" || models[1] === "cancel" || models[1] === "verify") === (req.method === "POST")) {
+    const models = name.match(/^models(?:\/(progress|download|cancel|verify|delete))?$/);
+    if (models && (["download", "cancel", "verify", "delete"].includes(models[1]) ? req.method === "POST" : req.method === "GET" || req.method === "HEAD")) {
       return modelsRoute(req, res, url, models[1] || null);
     }
     if (req.method !== "GET" && req.method !== "HEAD") return notFound(res);

@@ -52,6 +52,29 @@ const Setup = (() => {
             custom ? `${I18n.num(v)} ${unit}` : tr("Set a value…"))),
         h("div", { class: "set-note muted small" }, help));
     };
+    function modelDirectory() {
+      const dir = cur.models_directory;
+      if (!dir?.configurable) return null;
+      const label = tr("Model directory");
+      const help = tr("Finish or cancel model downloads and checks first. After saving, choose Stop everything and reopen Sync-Strata; closing the window alone is not enough. No files are moved or deleted. Models will be read and downloaded in the new folder. Chat history and the existing chat cache location stay unchanged.");
+      const automatic = !cur.settings.models_dir || cur.settings.models_dir === "auto";
+      return h("div", { class: "set-group" },
+        h("div", { class: "set-label muted small" }, label),
+        h("div", { class: "set-note small", style: "overflow-wrap: anywhere" }, dir.path),
+        h("div", { class: "set-choices" },
+          h("button", { class: `chip${automatic ? " on" : ""}`, type: "button", "aria-pressed": String(automatic),
+            onclick: async () => {
+              if (automatic) return;
+              if (await confirmSheet({ title: tr("Use the default model directory?"), message: help, okLabel: tr("Save") })) {
+                try { await save({ models_dir: "auto" }); } catch { /* save shows the error */ }
+              }
+            } }, tr("Automatic")),
+          h("button", { class: "chip", type: "button", onclick: () => openPrompt({
+            title: label, value: dir.path, placeholder: tr("Absolute folder path"), note: help, maxLength: 4096,
+            onSubmit: async (text) => { if (text !== dir.path) await save({ models_dir: text }); },
+          }) }, tr("Change folder…"))),
+        h("div", { class: "set-note muted small" }, help));
+    }
     function render() {
       if (!cur) return;
       if (cur.settings && cur.settings.ram_squeeze == null) cur.settings.ram_squeeze = "auto";   // 11/16: not set = the default, on
@@ -60,6 +83,7 @@ const Setup = (() => {
       const models = (cur.models || []).map((m) => (typeof m === "string" ? [m, (modelOf(m) || {}).name || m] : [m.id, m.name || m.id]));
       body.replaceChildren(
         choice(tr("Model"), "model", [["auto", tr("Automatic")], ...models], tr("Automatic: the model that suits this PC")),
+        ...[modelDirectory()].filter(Boolean),
         // 11/15 本人: 起動時の tail skip は R4・R7・R10（自動＝この PC に推奨の方）．API を別のソフトから使うときだけ効く
         choice(tr("Tail skip at start"), "tail_skip", [["auto", tr("Automatic")], ...[4, 7, 10].map((r) => [r, Spec.v && Spec.v.recommended_r === r ? `${rLabel(r)} · ${tr("Recommended for this PC")}` : rLabel(r)])],
           tr("Applies only when another program uses the API.")),
@@ -78,7 +102,9 @@ const Setup = (() => {
     async function save(change) {
       try {
         cur = await settingsCall(change);
-        toast(tr("Saved. It takes effect at the next start"));
+        toast(Object.hasOwn(change, "models_dir")
+          ? tr("Saved. Stop everything and reopen Sync-Strata to apply the model directory.")
+          : tr("Saved. It takes effect at the next start"));
       } catch (e) {
         toast(e.message);
         throw e;

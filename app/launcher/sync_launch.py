@@ -868,6 +868,7 @@ def main(argv=None):
     窓は --open のときだけ開く（窓を開くのはアプリの枠の仕事）．設定は settings.json → 引数の順で上書き，auto は PC を調べて決める"""
     ap = argparse.ArgumentParser(prog="sync up")
     mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--desktop-auto", action="store_true", help=argparse.SUPPRESS)  # Native shell only
     mode.add_argument("--gui", action="store_true", help="エンジン＋dsh（既定．窓は開かない）")
     mode.add_argument("--no-gui", action="store_true", help="エンジン＋dsh（--gui と同じ．スマホから使う人向けの名前）")
     mode.add_argument("--api-only", action="store_true", help="エンジンだけ（dsh も会話の画面も起こさない）")
@@ -898,9 +899,6 @@ def main(argv=None):
     except (ValueError, KeyError) as e:
         say(f"設定が正しくありません: {e}")
         return 2
-    if not a.stop:       # 11/18 W12: ふさがっている番号は空いている番号に替える（--stop は書かれている番号のまま止める．--dry は書かない）
-        H.ensure_ports(s, say, persist=not a.dry)
-    PORT = s["api_port"]
     want = "auto" if s["model"] in (None, "auto") else s["model"]
     gui = not a.api_only
     key = a.api_key or os.environ.get("STRATA_API_KEY", "")
@@ -911,6 +909,20 @@ def main(argv=None):
         if JSON_OUT:
             print(json.dumps(result, ensure_ascii=False), flush=True)
         return code
+
+    if a.desktop_auto and s["desktop_auto_start"] == "off" and not (a.dry or a.stop):
+        # Keep chat and explicit model starts available without loading the engine.
+        # start_dsh reuses running services and handles port selection itself.
+        ok = H.start_dsh(s, say)
+        if ok and a.open:
+            say("  " + open_gui(url=H.gui_url(s)))
+        return done(0 if ok else 6, engine_started=False,
+                    url=f"http://127.0.0.1:{s['relay_port']}/m/" if ok else None,
+                    **({} if ok else {"error": H.DSH_ERROR or "dsh か会話の画面の中継が起きませんでした"}))
+
+    if not a.stop:       # 11/18 W12: ふさがっている番号は空いている番号に替える（--stop は書かれている番号のまま止める．--dry は書かない）
+        H.ensure_ports(s, say, persist=not a.dry)
+    PORT = s["api_port"]
 
     import sync_env      # 11/15 夜: 対応外の PC では起こさずに理由を返す（終了コード 8．アプリの枠の「起動の失敗」に出る）
     ev = sync_env.check()

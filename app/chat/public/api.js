@@ -108,7 +108,8 @@ const Api = (() => {
     call,
     mux,
     listSessions: () => call("session/list", { _request: {} }),
-    createSession: (workspaceId) => call("session/create", { request: { workspaceId } }),
+    createSession: (workspaceId, agentPreset) => call("session/create", { request: { workspaceId, agentPreset } }),
+    forkSession: (sessionId, atSeq) => call("session/fork", { request: { sessionId, atSeq } }),
     // parts: 画像 {type:"image", mediaType, data, name} やファイル {type:"file", receiptId}（attach.js）．文字が空でも部品があれば送れる
     prompt: (sessionId, text, mode = "queue", parts = []) =>
       call("session/prompt", {
@@ -162,6 +163,8 @@ const Api = (() => {
       call("workspace/archiveSession", { request: { sessionId, ...(stopActivity ? { stopActivity: true } : {}) } }),
     unarchive: (sessionId) => call("workspace/unarchiveSession", { request: { sessionId } }),
     createWorkspace: (path) => call("workspace/create", { request: { path } }),
+    // dsh deletes only the registration, not its directory or sessions.
+    removeWorkspace: (workspaceId) => call("workspace/delete", { request: { workspaceId } }),
     renameWorkspace: (workspaceId, title) => call("workspace/rename", { request: { workspaceId, title } }),
   };
 })();
